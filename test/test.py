@@ -1,40 +1,52 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
 # SPDX-License-Identifier: Apache-2.0
+"""V4 RTL and gate-level smoke test: outputs disabled and pins safe.
 
+Never activates a ring oscillator. Ideal combinational feedback loops are not
+valid frequency simulations and may stall a zero-delay HDL simulator. This
+checks the deterministic disabled/reset behavior and dual-MUX selections only.
+"""
 import cocotb
-from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import Timer
+
+
+async def assert_inactive(dut, label):
+    await Timer(1000, unit="ns")
+    output = int(dut.uo_out.value)
+    io_output = int(dut.uio_out.value)
+    io_enable = int(dut.uio_oe.value)
+    assert output == 0, f"{label}: expected uo_out=0x00, got 0x{output:02x}"
+    assert io_output == 0, f"{label}: uio_out is not all zero"
+    assert io_enable == 0, f"{label}: bidirectional pins must be inputs"
 
 
 @cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start")
-
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
-
-    # Reset
-    dut._log.info("Reset")
-    dut.ena.value = 1
+async def test_v4_safe_disabled_reset(dut):
+    dut.clk.value = 0  # No synchronous logic in this design.
     dut.ui_in.value = 0
     dut.uio_in.value = 0
+    dut.ena.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await assert_inactive(dut, "initial reset")
+
+    # Reset released; RO_ENABLE=1 but TT project enable is OFF.
     dut.rst_n.value = 1
+    dut.uio_in.value = 1
+    for a, b in ((0, 0), (0, 15), (3, 9), (15, 0)):
+        dut.ui_in.value = (b << 4) | a
+        await assert_inactive(dut, f"ena=0, selectors {a}/{b}")
 
-    dut._log.info("Test project behavior")
+    # TT enable ON but local RO_ENABLE is OFF.
+    dut.ena.value = 1
+    dut.uio_in.value = 0
+    for a, b in ((1, 3), (4, 12), (15, 15)):
+        dut.ui_in.value = (b << 4) | a
+        await assert_inactive(dut, f"RO_ENABLE=0, selectors {a}/{b}")
 
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
+    # Reset asserted with both enables high; no ring can start.
+    dut.uio_in.value = 1
+    dut.rst_n.value = 0
+    for a, b in ((0, 15), (7, 8), (15, 15)):
+        dut.ui_in.value = (b << 4) | a
+        await assert_inactive(dut, f"rst_n=0, selectors {a}/{b}")
 
-    # Wait for one clock cycle to see the output values
-    await ClockCycles(dut.clk, 1)
-
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
-
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+    dut._log.info("V4 disabled/reset RTL/GL smoke test passed. Frequencies not tested.")
